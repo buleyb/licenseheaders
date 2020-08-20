@@ -32,6 +32,7 @@ from shutil import copyfile
 from string import Template
 
 import regex as re
+import hashlib
 
 __version__ = '0.8.4'
 __author__ = 'Johann Petrak'
@@ -235,12 +236,16 @@ typeSettings = {
         "headerLineSuffix": None
     }
 }
+tagStartStr = r"STARTLICENSE"
+tagStopStr = r"STOPLICENSE"
 
 yearsPattern = re.compile(
     r"(?<=Copyright\s*(?:\(\s*[Cc©]\s*\)\s*))?([0-9][0-9][0-9][0-9](?:-[0-9][0-9]?[0-9]?[0-9]?)?)",
     re.IGNORECASE)
 licensePattern = re.compile(r"license", re.IGNORECASE)
 emptyPattern = re.compile(r'^\s*$')
+startTagPattern = re.compile(tagStartStr, re.IGNORECASE)
+stopTagPattern = re.compile(tagStopStr, re.IGNORECASE)
 
 # maps each extension to its processing type. Filled from tpeSettings during initialization
 ext2type = {}
@@ -331,6 +336,8 @@ def parse_command_line(argv):
                         help="Provide a comma-separated list of additional file extensions as value for a "
                              "specified language as key, each with a leading dot and no whitespace (default: None).",
                         action=DictArgs)
+    parser.add_argument("--usetags",  action="store_true", default=False,
+                        help="Use and search for start/end tags around licenses.")
     parser.add_argument("-x", "--exclude", type=str, nargs="*",
                         help="File path patterns to exclude")
     arguments = parser.parse_args(argv[1:])
@@ -401,19 +408,30 @@ def for_type(templatelines, ftype):
     header_end_line = settings["headerEndLine"]
     header_line_prefix = settings["headerLinePrefix"]
     header_line_suffix = settings["headerLineSuffix"]
-    if header_start_line is not None:
-        lines.append(header_start_line)
-    for line in templatelines:
-        tmp = line
-        if header_line_prefix is not None and line == '\n':
-            tmp = header_line_prefix.rstrip() + tmp
-        elif header_line_prefix is not None:
-            tmp = header_line_prefix + tmp
-        if header_line_suffix is not None:
-            tmp = tmp + header_line_suffix
-        lines.append(tmp)
-    if header_end_line is not None:
-        lines.append(header_end_line)
+        
+    if isinstance(templatelines,list):
+        if header_start_line is not None:
+            lines.append(header_start_line)
+        for line in templatelines:
+            tmp = line
+            if header_line_prefix is not None and line == '\n':
+                tmp = header_line_prefix.rstrip() + tmp
+            elif header_line_prefix is not None:
+                tmp = header_line_prefix + tmp
+            if header_line_suffix is not None:
+                tmp = tmp + header_line_suffix
+            lines.append(tmp)
+        if header_end_line is not None:
+            lines.append(header_end_line)
+    # If the template is only a one line str, then treat it as such and stick it in a block commenta
+    elif isinstance(templatelines, str):
+        if header_start_line is not None:
+            lines.append(header_start_line)
+        lines.append(templatelines)
+        if header_end_line is not None:
+            lines.append(header_end_line)
+    else: #not a known type, return empty header and debug
+        LOGGER.debug("Unexpected type received for header format: {}", type(templatelines))
     return lines
 
 
@@ -437,6 +455,8 @@ def read_file(file, args):
     head_end = None
     years_line = None
     have_license = False
+    contentHash = None
+    fileFailed = False
     filename, extension = os.path.splitext(file)
     LOGGER.debug("File name is %s", os.path.basename(filename))
     LOGGER.debug("File extension is %s", extension)
@@ -456,6 +476,7 @@ def read_file(file, args):
     block_comment_start_pattern = settings.get("blockCommentStartPattern")
     block_comment_end_pattern = settings.get("blockCommentEndPattern")
     line_comment_start_pattern = settings.get("lineCommentStartPattern")
+    useTagPatterns = args.usetags
     i = 0
     LOGGER.info("Processing file {} as {}".format(file, ftype))
     for line in lines:
@@ -484,7 +505,9 @@ def read_file(file, args):
                     "headEnd": None,
                     "yearsLine": None,
                     "settings": settings,
-                    "haveLicense": have_license
+                    "haveLicense": have_license,
+                    "contentHash": contentHash,
+                    "fileFailed": fileFailed
                     }
         i = i + 1
     LOGGER.debug("Found preliminary start at {}, i={}, lines={}".format(head_start, i, len(lines)))
@@ -499,7 +522,9 @@ def read_file(file, args):
                 "headEnd": head_end,
                 "yearsLine": years_line,
                 "settings": settings,
-                "haveLicense": have_license
+                "haveLicense": have_license,
+                "contentHash": contentHash,
+                "fileFailed": fileFailed
                 }
     # otherwise process the comment block until it ends
     if block_comment_start_pattern:
@@ -507,7 +532,34 @@ def read_file(file, args):
         for j in range(i, len(lines)):
             LOGGER.debug("Checking line {}".format(j))
             if licensePattern.findall(lines[j]):
+                # LOGGER.debug("license found")
                 have_license = True
+            if not useTagPatterns and startTagPattern.findall(lines[j]):
+                #This is a check for processing files that might have been created with --usetags but we aren't running it.  Print error , add to list of errors for return
+                message = "Found LicenseHeaders tags in license for file {} but --usetags is not specified".format(file)
+                LOGGER.error(message)
+                fileFailed = True
+                return {"type": ftype,
+                        "lines": lines,
+                        "skip": skip,
+                        "headStart": head_start,
+                        "headEnd": head_end,
+                        "yearsLine": years_line,
+                        "settings": settings,
+                        "haveLicense": have_license,
+                        "contentHash": contentHash,
+                        "fileFailed": fileFailed
+                        }
+            if useTagPatterns and stopTagPattern.findall(lines[j]):
+                LOGGER.debug("Using tags, found END tags at line {}".format(j))
+                # find hash of license, on the same line as the end_tag, enclosed in square brackets. e.g., ENDLICENSE hash[a35ddd4s43]
+                #TODO: Might want to reduce the search field for this, if we're only using hexidecimal hashes...
+                hashmatch = re.search(r"\[([A-Za-z0-9_]+)\]", lines[j])
+                if hashmatch != None:
+                    starthash, endhash = hashmatch.span()
+                    contentHash = hashmatch.string[starthash+1:endhash-1]
+                # assume license is present (even if no lines between start/end tags), as we want to process the block for updates
+                # continue to find the block_comment_end
             elif block_comment_end_pattern.findall(lines[j]):
                 return {"type": ftype,
                         "lines": lines,
@@ -516,7 +568,9 @@ def read_file(file, args):
                         "headEnd": j,
                         "yearsLine": years_line,
                         "settings": settings,
-                        "haveLicense": have_license
+                        "haveLicense": have_license,
+                        "contentHash": contentHash,
+                        "fileFailed": fileFailed
                         }
             elif yearsPattern.findall(lines[j]):
                 have_license = True
@@ -531,7 +585,9 @@ def read_file(file, args):
                 "headEnd": None,
                 "yearsLine": None,
                 "settings": settings,
-                "haveLicense": have_license
+                "haveLicense": have_license,
+                "contentHash": contentHash,
+                "fileFailed": fileFailed
                 }
     else:
         LOGGER.debug("ELSE1")
@@ -547,7 +603,9 @@ def read_file(file, args):
                         "headEnd": j - 1,
                         "yearsLine": years_line,
                         "settings": settings,
-                        "haveLicense": have_license
+                        "haveLicense": have_license,
+                        "contentHash": contentHash,
+                        "fileFailed": fileFailed
                         }
             elif yearsPattern.findall(lines[j]):
                 have_license = True
@@ -562,7 +620,9 @@ def read_file(file, args):
                 "headEnd": len(lines) - 1,
                 "yearsLine": years_line,
                 "settings": settings,
-                "haveLicense": have_license
+                "haveLicense": have_license,
+                "contentHash": contentHash,
+                "fileFailed": fileFailed
                 }
 
 
@@ -616,6 +676,7 @@ def main():
         error = False
         template_lines = None
         start_dir = arguments.dir
+        failedFiles = []
         settings = {}
         if arguments.years:
             settings["years"] = arguments.years
@@ -683,57 +744,108 @@ def main():
                     LOGGER.info("Ignoring file {}".format(file))
                     continue
                 finfo = read_file(file, arguments)
+                if finfo["fileFailed"]:
+                    LOGGER.error("File {} failed processing".format(file))
+                    failedFiles.append(file)
+                    continue
                 if not finfo:
                     LOGGER.debug("File not supported %s", file)
                     continue
-                # logging.debug("FINFO for the file: %s", finfo)
-                lines = finfo["lines"]
-                LOGGER.debug(
-                    "Info for the file: headStart=%s, headEnd=%s, haveLicense=%s, skip=%s, len=%s, yearsline=%s",
-                    finfo["headStart"], finfo["headEnd"], finfo["haveLicense"], finfo["skip"], len(lines),
-                    finfo["yearsLine"])
-                # if we have a template: replace or add
-                if template_lines:
-                    make_backup(file, arguments)
-                    if arguments.dry:
-                        LOGGER.info("Would be updating changed file: {}".format(file))
-                    else:
-                        with open(file, 'w', encoding=arguments.encoding) as fw:
-                            # if we found a header, replace it
-                            # otherwise, add it after the lines to skip
-                            head_start = finfo["headStart"]
-                            head_end = finfo["headEnd"]
-                            have_license = finfo["haveLicense"]
-                            ftype = finfo["type"]
-                            skip = finfo["skip"]
-                            if head_start is not None and head_end is not None and have_license:
-                                LOGGER.debug("Replacing header in file {}".format(file))
-                                # first write the lines before the header
-                                fw.writelines(lines[0:head_start])
-                                #  now write the new header from the template lines
-                                fw.writelines(for_type(template_lines, ftype))
-                                #  now write the rest of the lines
-                                fw.writelines(lines[head_end + 1:])
-                            else:
-                                LOGGER.debug("Adding header to file {}, skip={}".format(file, skip))
-                                fw.writelines(lines[0:skip])
-                                fw.writelines(for_type(template_lines, ftype))
-                                fw.writelines(lines[skip:])
-                        # TODO: optionally remove backup if all worked well?
-                else:
-                    # no template lines, just update the line with the year, if we found a year
-                    years_line = finfo["yearsLine"]
-                    if years_line is not None:
+                if(not arguments.usetags): #using traditional find-headers by comment style
+                    # logging.debug("FINFO for the file: %s", finfo)
+                    lines = finfo["lines"]
+                    LOGGER.debug(
+                        "Info for the file: headStart=%s, headEnd=%s, haveLicense=%s, skip=%s, len=%s, yearsline=%s",
+                        finfo["headStart"], finfo["headEnd"], finfo["haveLicense"], finfo["skip"], len(lines),
+                        finfo["yearsLine"])
+                    # if we have a template: replace or add
+                    if template_lines:
                         make_backup(file, arguments)
                         if arguments.dry:
-                            LOGGER.info("Would be updating year line in file {}".format(file))
+                            LOGGER.info("Would be updating changed file: {}".format(file))
                         else:
                             with open(file, 'w', encoding=arguments.encoding) as fw:
-                                LOGGER.debug("Updating years in file {} in line {}".format(file, years_line))
-                                fw.writelines(lines[0:years_line])
-                                fw.write(yearsPattern.sub(arguments.years, lines[years_line]))
-                                fw.writelines(lines[years_line + 1:])
-                            # TODO: optionally remove backup if all worked well
+                                # if we found a header, replace it
+                                # otherwise, add it after the lines to skip
+                                head_start = finfo["headStart"]
+                                head_end = finfo["headEnd"]
+                                have_license = finfo["haveLicense"]
+                                ftype = finfo["type"]
+                                skip = finfo["skip"]
+                                if head_start is not None and head_end is not None and have_license:
+                                    LOGGER.debug("Replacing header in file {}".format(file))
+                                    # first write the lines before the header
+                                    fw.writelines(lines[0:head_start])
+                                    #  now write the new header from the template lines
+                                    fw.writelines(for_type(template_lines, ftype))
+                                    #  now write the rest of the lines
+                                    fw.writelines(lines[head_end + 1:])
+                                else:
+                                    LOGGER.debug("Adding header to file {}, skip={}".format(file, skip))
+                                    fw.writelines(lines[0:skip])
+                                    fw.writelines(for_type(template_lines, ftype))
+                                    fw.writelines(lines[skip:])
+                            # TODO: optionally remove backup if all worked well?
+                    else:
+                        # no template lines, just update the line with the year, if we found a year
+                        years_line = finfo["yearsLine"]
+                        if years_line is not None:
+                            make_backup(file, arguments)
+                            if arguments.dry:
+                                LOGGER.info("Would be updating year line in file {}".format(file))
+                            else:
+                                with open(file, 'w', encoding=arguments.encoding) as fw:
+                                    LOGGER.debug("Updating years in file {} in line {}".format(file, years_line))
+                                    fw.writelines(lines[0:years_line])
+                                    fw.write(yearsPattern.sub(arguments.years, lines[years_line]))
+                                    fw.writelines(lines[years_line + 1:])
+                                # TODO: optionally remove backup if all worked well
+                else: #using tag-matching arguments.usetags=True
+                    # logging.debug("FINFO for the file: %s", finfo)
+                    lines = finfo["lines"]
+                    LOGGER.debug(
+                        "Info for the file: usetags=%s, headStart=%s, headEnd=%s, haveLicense=%s, skip=%s, len=%s, yearsline=%s, contentHash=%s",
+                        arguments.usetags, finfo["headStart"], finfo["headEnd"], finfo["haveLicense"], finfo["skip"], len(lines),
+                        finfo["yearsLine"], finfo["contentHash"])
+                    # if we have a template: replace or add
+                    file_header_hash = hashlib.sha256(''.join(template_lines).encode('utf-8')).hexdigest()
+                    if finfo["haveLicense"] and file_header_hash == finfo["contentHash"]:
+                        LOGGER.debug("Header has license [haveLicense={}] but header not changed, skipping file {}: FileHash:[{}], TemplateHash:[{}]".format(finfo["haveLicense"], file, finfo["contentHash"], file_header_hash))
+                        break
+                    if template_lines:
+                        make_backup(file, arguments)
+                        if arguments.dry:
+                            LOGGER.info("Would be updating changed file: {}".format(file))
+                        else:
+                            with open(file, 'w', encoding=arguments.encoding) as fw:
+                                # if we found a header, replace it
+                                # otherwise, add it after the lines to skip
+
+                                head_start = finfo["headStart"]
+                                head_end = finfo["headEnd"]
+                                have_license = finfo["haveLicense"]
+                                ftype = finfo["type"]
+                                skip = finfo["skip"]
+                                if head_start is not None and head_end is not None and have_license:
+                                    LOGGER.debug("Replacing header in file {}".format(file))
+                                    # first write the lines before the header
+                                    fw.writelines(lines[0:head_start])
+                                    #  now write the new header from the template lines including the start/end/hash
+                                    fw.writelines(for_type([tagStartStr + "\n"] + template_lines + [tagStopStr + " hash[{}]\n".format(file_header_hash)], ftype))
+                                    # write the rest of the file
+                                    fw.writelines(lines[head_end + 1:])
+                                else:  #nothing found, add new
+                                    LOGGER.debug("Adding header to file {}, skip={}".format(file, skip))
+                                    fw.writelines(lines[0:skip])
+                                    fw.writelines(for_type([tagStartStr + "\n"] + template_lines + [tagStopStr + " hash[{}]\n".format(file_header_hash)], ftype))
+                                    fw.writelines(lines[skip:])
+                            # TODO: optionally remove backup if all worked well?
+            for failure in failedFiles:
+                LOGGER.error("FAILED: {}".format(failure))
+            with open(os.path.join(start_dir, "ErrorLog.txt"), 'w') as errorLog:
+                errorLog.write('\n'.join(failedFiles))
+                    
+
     finally:
         logging.shutdown()
 
