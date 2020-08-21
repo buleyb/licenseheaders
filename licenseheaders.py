@@ -842,8 +842,9 @@ def main():
                             # TODO: optionally remove backup if all worked well?
             for failure in failedFiles:
                 LOGGER.error("FAILED: {}".format(failure))
-            with open(os.path.join(start_dir, "ErrorLog.txt"), 'w') as errorLog:
-                errorLog.write('\n'.join(failedFiles))
+            if failedFiles:
+                with open(os.path.join(start_dir, "ErrorLog.txt"), 'w') as errorLog:
+                    errorLog.write('\n'.join(failedFiles))
                     
 
     finally:
