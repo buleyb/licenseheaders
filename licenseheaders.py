@@ -234,6 +234,18 @@ typeSettings = {
         "headerEndLine": "##\n",
         "headerLinePrefix": "## ",
         "headerLineSuffix": None
+    },
+    "zig": {
+        "extensions": [".zig"],
+        "keepFirst": None,
+        "blockCommentStartPattern": None,
+        "blockCommentEndPattern": None,
+        "lineCommentStartPattern": re.compile(r'\s*//'),
+        "lineCommentEndPattern": None,
+        "headerStartLine": "//!\n",
+        "headerEndLine": "//!\n",
+        "headerLinePrefix": "//! ",
+        "headerLineSuffix": None
     }
 }
 tagStartStr = r"STARTLICENSE"
