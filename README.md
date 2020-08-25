@@ -35,6 +35,7 @@ optional arguments:
                         Url of project to use.
   --enc ENCODING        Encoding of program files (default: utf-8)
   --dry                 Only show what would get done, do not change any files
+  --usetags             Use START and END tagging support to identify and manage header blocks
   --safesubst           Do not raise error if template variables cannot be
                         substituted.
   -D                    Enable debug messages (same as -v -v -v)
